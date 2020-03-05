@@ -1,3 +1,4 @@
+iexfinance
 requests
 ariadne==0.10.0
 asgiref==3.2.3
