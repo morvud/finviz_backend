@@ -4,9 +4,10 @@ import datetime
 import pandas as pd
 from ariadne import QueryType, make_executable_schema, ObjectType, MutationType
 from ariadne.contrib.django.scalars import date_scalar, datetime_scalar
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 from graphql import GraphQLResolveInfo
-from iexfinance import stocks
+from iexfinance import stocks, utils
 from pandas import np
 
 from portfolio.methods import buy_order
@@ -18,6 +19,8 @@ type_defs = """
     
     type Query {
         portfolio: Portfolio!
+        stock(symbol: String!): Stock
+        stocks(symbol: String): [Stock]!
     }
     
     type Mutation {
@@ -73,7 +76,24 @@ def resolve_buy(_, info: GraphQLResolveInfo, input):
         "symbol": input.get("symbol"),
         "quantity": input.get("quantity"),
     }
-    return buy_order(clean_input)
+    position = buy_order(clean_input)
+    p = Portfolio.objects.first()
+    Transaction.objects.create(
+        amount=-position.quantity * position.price, portfolio=p, date=position.opened
+    )
+    return position
+
+
+@query.field("stock")
+def resolve_stock(_, info: GraphQLResolveInfo, symbol: str):
+    return Stock.objects.get(symbol=symbol)
+
+
+@query.field("stocks")
+def resolve_stocks(_, info: GraphQLResolveInfo, symbol: str):
+    if symbol:
+        return Stock.objects.filter(symbol__icontains=symbol)[:10]
+    return Stock.objects.all()[:10]
 
 
 @portfolio.field("openPositions")
@@ -95,18 +115,23 @@ def resolve_balance(obj: Portfolio, info: GraphQLResolveInfo):
 @portfolio.field("history")
 def resolve_history(obj: Portfolio, info: GraphQLResolveInfo):
     positions = obj.position_set.all()
-    history = pd.DataFrame({"close": []})
+    history = obj.get_history()
+    print(history)
     for position in positions:
         prices = stocks.get_historical_data(
-            position.stock.symbol, start=position.opened,
-            end=position.closed or timezone.now(), close_only=True, output_format="pandas"
+            position.stock.symbol,
+            start=position.opened,
+            end=position.closed or timezone.now(),
+            close_only=True,
+            output_format="pandas",
         )
         values = prices.close
-        if not position.closed:
-            quote = stocks.Stock(position.stock.symbol).get_quote().get("latestPrice")
-            values = values.append(pd.Series({pd.Timestamp(timezone.now().date()): quote}))
-        history["close"] = history["close"].add(position.quantity * values, fill_value=0)
-    return list(zip([1000 * x.timestamp() for x in history.index], history.close.values))
+        history["close"] = history["close"].add(
+            position.quantity * values, fill_value=0
+        )
+    return list(
+        zip([1000 * x.timestamp() for x in history.index], history.close.values)
+    )
 
 
 @stock.field("latestPrice")
@@ -115,4 +140,6 @@ def resolve_latest_price(obj: Stock, info: GraphQLResolveInfo):
     return quote.get("latestPrice")
 
 
-schema = make_executable_schema(type_defs, query, mutation, portfolio, stock, [date_scalar, datetime_scalar])
+schema = make_executable_schema(
+    type_defs, query, mutation, portfolio, stock, [date_scalar, datetime_scalar]
+)
