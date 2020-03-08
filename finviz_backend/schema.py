@@ -8,7 +8,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 from graphql import GraphQLResolveInfo
 from iexfinance import stocks, utils
-from pandas import np
+import numpy as np
 
 from portfolio.methods import buy_order
 from portfolio.models import *
