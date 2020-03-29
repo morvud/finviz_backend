@@ -1,5 +1,5 @@
 # schema.py
-import datetime
+from datetime import datetime
 
 import pandas as pd
 from ariadne import QueryType, make_executable_schema, ObjectType, MutationType
@@ -10,7 +10,7 @@ from graphql import GraphQLResolveInfo
 from iexfinance import stocks, utils
 import numpy as np
 
-from portfolio.methods import buy_order
+from portfolio.methods import buy_order, sell_order
 from portfolio.models import *
 
 type_defs = """
@@ -24,24 +24,33 @@ type_defs = """
     }
     
     type Mutation {
-        buy(input: BuyInput!): BuyPayload
+        buy(input: TransactionInput!): TransactionPayload
+        sell(input: TransactionInput!): TransactionPayload
     }
     
-    input BuyInput {
+    input TransactionInput {
         symbol: String!
         quantity: Int!
     }
     
-    type BuyPayload {
+    type TransactionPayload {
         stock: Stock!
         quantity: Int!
         price: Float!
     }
     
     type Portfolio {
-        balance: [Float]!
+        balance: Float!
         history: [[Float]]!
+        change: [[Float]]!
         openPositions: [Position]!
+        sectors: [Sector]!
+        sortino: Float!
+    }
+    
+    type Sector {
+        name: String!
+        share: Float!
     }
     
     type Position {
@@ -55,7 +64,8 @@ type_defs = """
     type Stock {
         symbol: String!
         name: String!
-        latestPrice: Float! 
+        latestPrice: Float!
+        chart: [[Float]]!
     }
 """
 
@@ -77,10 +87,16 @@ def resolve_buy(_, info: GraphQLResolveInfo, input):
         "quantity": input.get("quantity"),
     }
     position = buy_order(clean_input)
-    p = Portfolio.objects.first()
-    Transaction.objects.create(
-        amount=-position.quantity * position.price, portfolio=p, date=position.opened
-    )
+    return position
+
+
+@mutation.field("sell")
+def resolve_sell(_, info: GraphQLResolveInfo, input):
+    clean_input = {
+        "symbol": input.get("symbol"),
+        "quantity": input.get("quantity"),
+    }
+    position = sell_order(clean_input)
     return position
 
 
@@ -109,28 +125,64 @@ def resolve_open_positions(obj: Portfolio, info: GraphQLResolveInfo):
 
 @portfolio.field("balance")
 def resolve_balance(obj: Portfolio, info: GraphQLResolveInfo):
-    return obj.balance
+    return obj.get_balance().close.values[-1]
+
+
+@portfolio.field("sortino")
+def resolve_sortino(obj: Portfolio, info: GraphQLResolveInfo):
+    positions = obj.position_set.order_by("opened")
+    df = stocks.get_historical_data(
+        list(positions.values_list("stock__symbol", flat=True)),
+        start=positions.first().opened,
+        end=timezone.now(),
+        output_format="pandas",
+        close_only=True,
+    )
+
+    return 0
+
+
+@portfolio.field("sectors")
+def resolve_sectors(obj: Portfolio, info: GraphQLResolveInfo):
+    positions = obj.position_set.all()
+    sectors = []
+    for position in positions:
+        sectors.append(
+            {
+                "name": stocks.Stock(position.stock.symbol).get_sector(),
+                "share": position.quantity * position.price,
+            }
+        )
+    total = sum([sector.get("share") for sector in sectors])
+    sectors = [{**sector, "share": sector.get("share") / total} for sector in sectors]
+    return sectors
 
 
 @portfolio.field("history")
 def resolve_history(obj: Portfolio, info: GraphQLResolveInfo):
-    positions = obj.position_set.all()
     history = obj.get_history()
-    print(history)
-    for position in positions:
-        prices = stocks.get_historical_data(
-            position.stock.symbol,
-            start=position.opened,
-            end=position.closed or timezone.now(),
-            close_only=True,
-            output_format="pandas",
-        )
-        values = prices.close
-        history["close"] = history["close"].add(
-            position.quantity * values, fill_value=0
-        )
     return list(
-        zip([1000 * x.timestamp() for x in history.index], history.close.values)
+        zip(
+            [
+                1000 * datetime.timestamp(datetime.combine(x, datetime.min.time()))
+                for x in history.index
+            ],
+            history.close.values,
+        )
+    )
+
+
+@portfolio.field("change")
+def resolve_change(obj: Portfolio, info: GraphQLResolveInfo):
+    history = obj.get_pct_change()
+    return list(
+        zip(
+            [
+                1000 * datetime.timestamp(datetime.combine(x, datetime.min.time()))
+                for x in history.index
+            ],
+            100 * history.close.fillna(0).values,
+        )
     )
 
 
@@ -138,6 +190,20 @@ def resolve_history(obj: Portfolio, info: GraphQLResolveInfo):
 def resolve_latest_price(obj: Stock, info: GraphQLResolveInfo):
     quote = stocks.Stock(obj.symbol).get_quote()
     return quote.get("latestPrice")
+
+
+@stock.field("chart")
+def resolve_chart(obj: Stock, info: GraphQLResolveInfo):
+    chart = obj.get_chart()
+    return list(
+        zip(
+            [
+                1000 * datetime.timestamp(datetime.combine(x, datetime.min.time()))
+                for x in chart.index
+            ],
+            chart.values,
+        )
+    )
 
 
 schema = make_executable_schema(
