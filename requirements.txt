@@ -10,3 +10,5 @@ starlette==0.13.2
 typing-extensions==3.7.4.1
 psycopg2==2.8.4
 trading-calendars==1.11.5
+pandas-datareader==0.8.1
+scipy==1.4.1
